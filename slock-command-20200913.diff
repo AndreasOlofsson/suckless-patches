@@ -1,0 +1,247 @@
+From: Andreas Olofsson <ao@blazar.se>
+Date: Sun, 13 Sep 2020 19:27:40
+Subject: [PATCH] Modified message patch to show the output of a command instead.
+
+---
+diff --git a/config.def.h b/config.def.h
+index c2a0ab2..e93fae9 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -11,8 +11,11 @@ static const char *colorname[NUMCOLS] = {
+ /* treat a cleared input like a wrong password (color) */
+ static const int failonclear = 1;
+ 
+-/* default message */
+-static const char * message = "Suckless: Software that sucks less.";
++/* command to generate message */
++static const char * command = "date";
++
++/* how often to refresh message (ms) */
++static const int command_interval = 1000;
+ 
+ /* text color */
+ static const char * text_color = "#ffffff";
+diff --git a/config.mk b/config.mk
+index c4ccf66..6bc9c76 100644
+--- a/config.mk
++++ b/config.mk
+@@ -12,7 +12,7 @@ X11LIB = /usr/X11R6/lib
+ 
+ # includes and libs
+ INCS = -I. -I/usr/include -I${X11INC}
+-LIBS = -L/usr/lib -lc -lcrypt -L${X11LIB} -lX11 -lXext -lXrandr -lXinerama
++LIBS = -L/usr/lib -lc -lcrypt -L${X11LIB} -lX11 -lXext -lXrandr -lXinerama -lrt
+ 
+ # flags
+ CPPFLAGS = -DVERSION=\"${VERSION}\" -D_DEFAULT_SOURCE -DHAVE_SHADOW_H
+diff --git a/slock.1 b/slock.1
+index 946165f..c91651c 100644
+--- a/slock.1
++++ b/slock.1
+@@ -7,7 +7,7 @@
+ .Nm
+ .Op Fl v
+ .Op Fl f
+-.Op Fl m Ar message
++.Op Fl c Ar command
+ .Op Ar cmd Op Ar arg ...
+ .Sh DESCRIPTION
+ .Nm
+@@ -20,8 +20,8 @@ is executed after the screen has been locked.
+ Print version information to stdout and exit.
+ .It Fl f
+ List all valid X fonts and exit.
+-.It Fl m Ar message
+-Overrides default slock lock message.
++.It Fl c Ar command
++Overrides default slock lock command.
+ .TP
+ .El
+ .Sh SECURITY CONSIDERATIONS
+diff --git a/slock.c b/slock.c
+index 610929b..31e9d70 100644
+--- a/slock.c
++++ b/slock.c
+@@ -8,6 +8,8 @@
+ #include <errno.h>
+ #include <grp.h>
+ #include <pwd.h>
++#include <time.h>
++#include <signal.h>
+ #include <stdarg.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+@@ -48,6 +50,11 @@ struct xrandr {
+ 	int errbase;
+ };
+ 
++timer_t timer_id;
++Display* dpy;
++struct lock **locks;
++int nlocks;
++
+ #include "config.h"
+ 
+ static void
+@@ -96,6 +103,25 @@ writemessage(Display *dpy, Window win, int screen)
+ 	XColor color, dummy;
+ 	XineramaScreenInfo *xsi;
+ 	GC gc;
++    char * message = malloc(1024);
++    FILE* process;
++    int read;
++
++    process = popen(command, "r");
++    len = 0;
++
++    while (1) {
++        read = fread(message + len, 1, 1023, process);
++        len += read;
++        message = realloc(message, len + 1024);
++        if (read != 1023) {
++            message[len] = '\0';
++            break;
++        }
++    }
++
++    pclose(process);
++
+ 	fontinfo = XLoadQueryFont(dpy, font_name);
+ 
+ 	if (fontinfo == NULL) {
+@@ -123,8 +149,6 @@ writemessage(Display *dpy, Window win, int screen)
+ 	 * Start formatting and drawing text
+ 	 */
+ 
+-	len = strlen(message);
+-
+ 	/* Max max line length (cut at '\n') */
+ 	line_len = 0;
+ 	k = 0;
+@@ -172,12 +196,34 @@ writemessage(Display *dpy, Window win, int screen)
+ 		}
+ 	}
+ 
++	free(message);
++
+ 	/* xsi should not be NULL anyway if Xinerama is active, but to be safe */
+ 	if (XineramaIsActive(dpy) && xsi != NULL)
+ 			XFree(xsi);
+ }
+ 
+-
++void trigger_redraw(int a) {
++	XEvent ev;
++	int i;
++
++	ev.xkey.type = KeyPress;
++	ev.xkey.serial = 0;
++	ev.xkey.send_event = True;
++	ev.xkey.display = dpy;
++	ev.xkey.time = CurrentTime;
++	ev.xkey.x = ev.xkey.y = 0;
++	ev.xkey.x_root = ev.xkey.y_root = 0;
++	ev.xkey.state = ShiftMask | ControlMask | Mod1Mask | Mod2Mask | Mod3Mask | Mod4Mask | Mod5Mask;
++	ev.xkey.keycode = 0;
++	ev.xkey.same_screen = True;
++
++	for (i = 0; i < nlocks; i++) {
++		ev.xkey.window = ev.xkey.root = ev.xkey.subwindow = locks[i]->win;
++		XSendEvent(dpy, locks[i]->win, False, 0, &ev);
++		XFlush(dpy);
++	}
++}
+ 
+ static const char *
+ gethash(void)
+@@ -236,8 +282,11 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
+ 	failure = 0;
+ 	oldc = INIT;
+ 
++	color = INIT;
++
+ 	while (running && !XNextEvent(dpy, &ev)) {
+ 		if (ev.type == KeyPress) {
++			int redraw_press = ev.xkey.keycode == 0 && ev.xkey.state == (ShiftMask | ControlMask | Mod1Mask | Mod2Mask | Mod3Mask | Mod4Mask | Mod5Mask);
+ 			explicit_bzero(&buf, sizeof(buf));
+ 			num = XLookupString(&ev.xkey, buf, sizeof(buf), &ksym, 0);
+ 			if (IsKeypadKey(ksym)) {
+@@ -246,11 +295,11 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
+ 				else if (ksym >= XK_KP_0 && ksym <= XK_KP_9)
+ 					ksym = (ksym - XK_KP_0) + XK_0;
+ 			}
+-			if (IsFunctionKey(ksym) ||
++			if ((IsFunctionKey(ksym) ||
+ 			    IsKeypadKey(ksym) ||
+ 			    IsMiscFunctionKey(ksym) ||
+ 			    IsPFKey(ksym) ||
+-			    IsPrivateKeypadKey(ksym))
++			    IsPrivateKeypadKey(ksym)) && !redraw_press)
+ 				continue;
+ 			switch (ksym) {
+ 			case XK_Return:
+@@ -283,8 +332,10 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
+ 				}
+ 				break;
+ 			}
+-			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
+-			if (running && oldc != color) {
++			if (!redraw_press) {
++				color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
++			}
++			if ((running && oldc != color) || redraw_press) {
+ 				for (screen = 0; screen < nscreens; screen++) {
+ 					XSetWindowBackground(dpy,
+ 					                     locks[screen]->win,
+@@ -397,20 +448,19 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
+ static void
+ usage(void)
+ {
+-	die("usage: slock [-v] [-f] [-m message] [cmd [arg ...]]\n");
++	die("usage: slock [-v] [-f] [-c command] [cmd [arg ...]]\n");
+ }
+ 
+ int
+ main(int argc, char **argv) {
+ 	struct xrandr rr;
+-	struct lock **locks;
++
+ 	struct passwd *pwd;
+ 	struct group *grp;
+ 	uid_t duid;
+ 	gid_t dgid;
+ 	const char *hash;
+-	Display *dpy;
+-	int i, s, nlocks, nscreens;
++	int i, s, nscreens;
+ 	int count_fonts;
+ 	char **font_names;
+ 
+@@ -418,8 +468,8 @@ main(int argc, char **argv) {
+ 	case 'v':
+ 		fprintf(stderr, "slock-"VERSION"\n");
+ 		return 0;
+-	case 'm':
+-		message = EARGF(usage());
++	case 'c':
++		command = EARGF(usage());
+ 		break;
+ 	case 'f':
+ 		if (!(dpy = XOpenDisplay(NULL)))
+@@ -500,6 +550,16 @@ main(int argc, char **argv) {
+ 		}
+ 	}
+ 
++	/* Set a timer to redraw the screen */
++	signal(SIGALRM, trigger_redraw);
++
++	timer_create(CLOCK_MONOTONIC, NULL, &timer_id);
++
++	struct itimerspec timeout;
++	timeout.it_value.tv_sec = timeout.it_interval.tv_sec = command_interval / 1000;
++	timeout.it_value.tv_nsec = timeout.it_interval.tv_nsec = command_interval * 1000 % 1000000;
++	timer_settime(timer_id, 0, &timeout, NULL);
++
+ 	/* everything is now blank. Wait for the correct password */
+ 	readpw(dpy, &rr, locks, nscreens, hash);
+ 
