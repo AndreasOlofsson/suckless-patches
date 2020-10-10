@@ -82,7 +82,7 @@ index 5ae738c..1e19d4b 100644
  enum {
  	INIT,
  	INPUT,
-@@ -83,6 +87,79 @@ dontkillme(void)
+@@ -83,6 +87,78 @@ dontkillme(void)
  }
  #endif
  
@@ -143,8 +143,7 @@ index 5ae738c..1e19d4b 100644
 +
 +    for (i = j = k = 0; i <= len; i++) {
 +        if (i == len || message[i] == '\n') {
-+            XftTextExtentsUtf8(dpy, font, (const FcChar8*) message, i - j, &extents);
-+            XftDrawString8(xftdraw, &xftcolor, font, x, y + k * font->ascent, (const FcChar8*) message + j, i - j);
++            XftDrawStringUtf8(xftdraw, &xftcolor, font, x, y + k * font->ascent, (const FcChar8*) message + j, i - j);
 +
 +            while (i < len && message[i] == '\n') {
 +                i++;
