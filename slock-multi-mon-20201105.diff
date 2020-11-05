@@ -1,0 +1,112 @@
+From: Andreas Olofsson <ao@blazar.se>
+Date: Thu, 5 Nov 2020 13:34:21 +0200
+Subject: [PATCH] Add support for multiple monitors when using messages. 
+
+---
+diff --git a/slock.c b/slock.c
+index 610929b..d6c2daa 100644
+--- a/slock.c
++++ b/slock.c
+@@ -48,6 +48,13 @@ struct xrandr {
+ 	int errbase;
+ };
+ 
++struct screen_rect {
++	int x;
++	int y;
++	int width;
++	int height;
++};
++
+ #include "config.h"
+ 
+ static void
+@@ -90,12 +97,14 @@ dontkillme(void)
+ static void
+ writemessage(Display *dpy, Window win, int screen)
+ {
+-	int len, line_len, width, height, s_width, s_height, i, j, k, tab_replace, tab_size;
++	int len, line_len, i, j, k, tab_replace, tab_size;
+ 	XGCValues gr_values;
+ 	XFontStruct *fontinfo;
+ 	XColor color, dummy;
+ 	XineramaScreenInfo *xsi;
+ 	GC gc;
++	int l, num_screens, x, y;
++	struct screen_rect* screen_rects;
+ 	fontinfo = XLoadQueryFont(dpy, font_name);
+ 
+ 	if (fontinfo == NULL) {
+@@ -142,36 +151,50 @@ writemessage(Display *dpy, Window win, int screen)
+ 		line_len = len;
+ 
+ 	if (XineramaIsActive(dpy)) {
+-		xsi = XineramaQueryScreens(dpy, &i);
+-		s_width = xsi[0].width;
+-		s_height = xsi[0].height;
++		xsi = XineramaQueryScreens(dpy, &num_screens);
++		if (!(screen_rects = calloc(num_screens, sizeof(struct screen_rect))))
++			die("slock: out of memory\n");
++		for (i = 0; i < num_screens; i++) {
++			screen_rects[i].x = xsi[i].x_org;
++			screen_rects[i].y = xsi[i].y_org;
++			screen_rects[i].width = xsi[i].width;
++			screen_rects[i].height = xsi[i].height;
++		}
+ 	} else {
+-		s_width = DisplayWidth(dpy, screen);
+-		s_height = DisplayHeight(dpy, screen);
++		if (!(screen_rects = calloc(1, sizeof(struct screen_rect))))
++			die("slock: out of memory\n");
++		num_screens = 1;
++		screen_rects[0].x = screen_rects[0].y = 0;
++		screen_rects[0].width = DisplayWidth(dpy, screen);
++		screen_rects[0].height = DisplayHeight(dpy, screen);
+ 	}
+ 
+-	height = s_height*3/7 - (k*20)/3;
+-	width  = (s_width - XTextWidth(fontinfo, message, line_len))/2;
+-
+-	/* Look for '\n' and print the text between them. */
+-	for (i = j = k = 0; i <= len; i++) {
+-		/* i == len is the special case for the last line */
+-		if (i == len || message[i] == '\n') {
+-			tab_replace = 0;
+-			while (message[j] == '\t' && j < i) {
+-				tab_replace++;
+-				j++;
+-			}
++	for (l = 0; l < num_screens; l++) {
++		y = screen_rects[l].y + (screen_rects[l].height*3/7 - (k*20))/3;
++		x = screen_rects[l].x + (screen_rects[l].width - XTextWidth(fontinfo, message, line_len))/2;
++
++		/* Look for '\n' and print the text between them. */
++		for (i = j = k = 0; i <= len; i++) {
++			/* i == len is the special case for the last line */
++			if (i == len || message[i] == '\n') {
++				tab_replace = 0;
++				while (message[j] == '\t' && j < i) {
++					tab_replace++;
++					j++;
++				}
+ 
+-			XDrawString(dpy, win, gc, width + tab_size*tab_replace, height + 20*k, message + j, i - j);
+-			while (i < len && message[i] == '\n') {
+-				i++;
+-				j = i;
+-				k++;
++				XDrawString(dpy, win, gc, x + tab_size*tab_replace, y + 20*k, message + j, i - j);
++				while (i < len && message[i] == '\n') {
++					i++;
++					j = i;
++					k++;
++				}
+ 			}
+ 		}
+ 	}
+ 
++	free(screen_rects);
++
+ 	/* xsi should not be NULL anyway if Xinerama is active, but to be safe */
+ 	if (XineramaIsActive(dpy) && xsi != NULL)
+ 			XFree(xsi);
